@@ -1,6 +1,8 @@
 """Personal Telegram bot exposed as an authenticated MCP server."""
 
 import os
+import threading
+import time
 
 import httpx
 import uvicorn
@@ -103,5 +105,42 @@ middleware = [
 ]
 app = mcp.http_app(middleware=middleware, stateless_http=True, json_response=True)
 
+
+def deployment_smoke_test(port: int) -> None:
+    """One-time operational probe, enabled only for the initial deployment."""
+    time.sleep(4)
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            handshake = client.post(
+                f"http://127.0.0.1:{port}/mcp",
+                headers={
+                    "Authorization": f"Bearer {MCP_ACCESS_TOKEN}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
+                },
+                json={
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-11-25", "capabilities": {},
+                        "clientInfo": {"name": "render-smoke-test", "version": "1.0"},
+                    },
+                },
+            )
+            valid = handshake.status_code == 200 and handshake.json().get("result", {}).get("serverInfo")
+            print(f"SMOKE MCP handshake: {'OK' if valid else 'FALHOU'} (HTTP {handshake.status_code})", flush=True)
+            if not valid or not TELEGRAM_BOT_TOKEN or not DEFAULT_CHAT_ID:
+                return
+            sent = client.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={"chat_id": DEFAULT_CHAT_ID, "text": "Teste de integração: servidor MCP do AssistSBF ativo."},
+            )
+            print(f"SMOKE Telegram sendMessage: {'OK' if sent.json().get('ok') else 'FALHOU'} (HTTP {sent.status_code})", flush=True)
+    except (httpx.HTTPError, ValueError) as exc:
+        print(f"SMOKE falhou: {type(exc).__name__}", flush=True)
+
+
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+    port = int(os.environ.get("PORT", 8000))
+    if os.getenv("SMOKE_TEST_ON_STARTUP") == "1":
+        threading.Thread(target=deployment_smoke_test, args=(port,), daemon=True).start()
+    uvicorn.run(app, host="0.0.0.0", port=port)
