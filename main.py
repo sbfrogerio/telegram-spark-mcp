@@ -7,7 +7,9 @@ import time
 import httpx
 import uvicorn
 from fastmcp import FastMCP
+from fastmcp.server.auth.providers.google import GoogleProvider, GoogleTokenVerifier
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+from mcp.server.auth.provider import TokenError
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
@@ -20,14 +22,48 @@ def required_env(name: str) -> str:
     return value
 
 
-MCP_ACCESS_TOKEN = required_env("MCP_ACCESS_TOKEN")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 DEFAULT_CHAT_ID = os.getenv("DEFAULT_CHAT_ID", "").strip()
 
-auth = StaticTokenVerifier(
-    tokens={MCP_ACCESS_TOKEN: {"client_id": "personal-gemini-spark", "scopes": ["telegram"]}},
-    required_scopes=["telegram"],
-)
+class PersonalGoogleProvider(GoogleProvider):
+    """Permit OAuth token exchange only for the owner's verified Google account."""
+
+    def __init__(self, *, allowed_email: str, client_id: str, **kwargs):
+        self._allowed_email = allowed_email.casefold()
+        self._identity_verifier = GoogleTokenVerifier(
+            required_scopes=["openid", "email"], audience=client_id
+        )
+        super().__init__(client_id=client_id, required_scopes=["openid", "email"], **kwargs)
+
+    async def _extract_upstream_claims(self, idp_tokens: dict) -> dict:
+        token = await self._identity_verifier.verify_token(idp_tokens["access_token"])
+        claims = token.claims if token else {}
+        email = str(claims.get("email") or "").casefold()
+        verified = str(claims.get("email_verified") or "").lower() in {"true", "1"}
+        if not verified or email != self._allowed_email:
+            raise TokenError("invalid_grant", "Conta Google não autorizada para este servidor")
+        return {"sub": token.subject, "email": email}
+
+
+oauth_client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "").strip()
+oauth_client_secret = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
+oauth_allowed_email = os.getenv("OAUTH_ALLOWED_EMAIL", "").strip()
+if any((oauth_client_id, oauth_client_secret, oauth_allowed_email)):
+    if not all((oauth_client_id, oauth_client_secret, oauth_allowed_email)):
+        raise RuntimeError("Configure GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET e OAUTH_ALLOWED_EMAIL juntos.")
+    auth = PersonalGoogleProvider(
+        client_id=oauth_client_id,
+        client_secret=oauth_client_secret,
+        allowed_email=oauth_allowed_email,
+        base_url="https://meu-telegram-mcp.onrender.com",
+    )
+else:
+    auth = StaticTokenVerifier(
+        tokens={required_env("MCP_ACCESS_TOKEN"): {
+            "client_id": "personal-gemini-spark", "scopes": ["telegram"]
+        }},
+        required_scopes=["telegram"],
+    )
 mcp = FastMCP("Telegram pessoal", auth=auth)
 
 
@@ -103,7 +139,11 @@ middleware = [
         expose_headers=["mcp-session-id"],
     )
 ]
-app = mcp.http_app(middleware=middleware, stateless_http=True, json_response=True)
+app = mcp.http_app(
+    middleware=[] if oauth_client_id else middleware,
+    stateless_http=True,
+    json_response=True,
+)
 
 
 def deployment_smoke_test(port: int) -> None:
@@ -114,7 +154,7 @@ def deployment_smoke_test(port: int) -> None:
             handshake = client.post(
                 f"http://127.0.0.1:{port}/mcp",
                 headers={
-                    "Authorization": f"Bearer {MCP_ACCESS_TOKEN}",
+                    "Authorization": f"Bearer {os.environ.get('MCP_ACCESS_TOKEN', '')}",
                     "Content-Type": "application/json",
                     "Accept": "application/json, text/event-stream",
                 },
@@ -141,6 +181,6 @@ def deployment_smoke_test(port: int) -> None:
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    if os.getenv("SMOKE_TEST_ON_STARTUP") == "1":
+    if os.getenv("SMOKE_TEST_ON_STARTUP") == "1" and not oauth_client_id:
         threading.Thread(target=deployment_smoke_test, args=(port,), daemon=True).start()
     uvicorn.run(app, host="0.0.0.0", port=port)
