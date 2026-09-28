@@ -2,10 +2,10 @@ import os
 import httpx
 from fastmcp import FastMCP
 
-# Inicializa o conector MCP
+# Inicializa o servidor FastMCP
 mcp = FastMCP("Telegram Bot MCP")
 
-# Token do BotFather
+# Token gerado pelo BotFather
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "SEU_TOKEN_AQUI")
 BASE_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
@@ -51,4 +51,5 @@ async def ler_ultimas_mensagens(quantidade: int = 5) -> str:
 
 if __name__ == "__main__":
     porta = int(os.environ.get("PORT", 8000))
-    mcp.run(transport="sse", host="0.0.0.0", port=porta)
+    # Modo Streamable HTTP (o padrão esperado pelo Gemini)
+    mcp.run(transport="http", host="0.0.0.0", port=porta)
